@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,33 +125,39 @@ def confirmation_text(count: int, subject: str) -> str:
     )
 
 
+def missing_workbook_message(path: str) -> str | None:
+    """Если книгу по константе открыть нельзя — текст ошибки, иначе None.
+
+    В тексте есть тот путь, который проверяли.
+    """
+    text = str(path).strip().strip('"')
+    if not text:
+        return (
+            "Путь к книге не задан.\n"
+            "Откройте app.py и в константе WORKBOOK_PATH пропишите путь к файлу .xlsx."
+        )
+    file_path = Path(text)
+    if not file_path.is_file():
+        return f"Файл книги не найден.\nИскали здесь:\n{text}"
+    if file_path.suffix.lower() != ".xlsx":
+        return f"Нужен файл Excel с расширением .xlsx.\nИскали здесь:\n{text}"
+    return None
+
+
 def delivery_problem(
     *,
     workbook: str,
     subject: str,
     body: str,
     attachment: str,
-    loaded_path: str | None,
+    loaded: bool,
 ) -> str | None:
     """Проверка полей перед планом писем. None — можно продолжать."""
-    path = workbook.strip()
-    if not path:
-        return "Укажите путь к файлу .xlsx."
-    file_path = Path(path)
-    if file_path.suffix.lower() != ".xlsx":
-        return "Нужен файл Excel с расширением .xlsx."
-    if not file_path.is_file():
-        return f"Файл не найден: {file_path}"
-    if loaded_path is None:
-        return "Сначала загрузите листы из книги Excel."
-    try:
-        same = os.path.normcase(str(file_path.resolve())) == os.path.normcase(
-            str(Path(loaded_path).resolve())
-        )
-    except OSError:
-        same = False
-    if not same:
-        return "Путь к книге изменился. Загрузите листы ещё раз."
+    missing = missing_workbook_message(workbook)
+    if missing:
+        return missing
+    if not loaded:
+        return "Книга не открыта. Проверьте путь WORKBOOK_PATH в файле app.py."
     if not subject.strip() or not body.strip():
         return "Заполните тему и текст письма. Они одинаковые для всех получателей."
     attachment_text = attachment.strip()

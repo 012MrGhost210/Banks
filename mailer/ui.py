@@ -17,6 +17,7 @@ from mailer.planning import (
     delivery_problem,
     format_log,
     format_skip,
+    missing_workbook_message,
     one_line,
     parse_column,
     plan_messages,
@@ -45,7 +46,7 @@ class SheetList(ttk.Frame):
         self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.bind("<Enter>", self._bind_wheel)
         self.canvas.bind("<Leave>", self._unbind_wheel)
-        self.show_message("Нажмите «Загрузить листы».")
+        self.show_message("Открываю книгу…")
 
     def destroy(self) -> None:
         self._unbind_wheel(None)
@@ -115,8 +116,9 @@ class SheetList(ttk.Frame):
 
 
 class LetterApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, workbook_path: str) -> None:
         self.root = root
+        self.workbook_path = workbook_path
         self.loaded: list[tuple[str, ColumnParse]] = []
         self.loaded_path: str | None = None
         self._busy = False
@@ -166,16 +168,10 @@ class LetterApp:
 
         book = ttk.LabelFrame(left, text="Книга Excel", padding=8)
         book.grid(row=0, column=0, sticky="ew")
-        ttk.Label(book, text="Путь к файлу:").pack(anchor="w")
-        book_row = ttk.Frame(book)
-        book_row.pack(fill="x", pady=(2, 0))
-        self.path_var = tk.StringVar()
-        self.path_entry = ttk.Entry(book_row, textvariable=self.path_var)
-        self.path_entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(book_row, text="Обзор…", command=self.browse_workbook).pack(side="left", padx=(6, 0))
-        self.load_button = ttk.Button(book, text="Загрузить листы", command=self.on_load)
+        self.book_label = ttk.Label(book, text=self.workbook_path, wraplength=440, justify="left")
+        self.book_label.pack(anchor="w")
+        self.load_button = ttk.Button(book, text="Обновить листы", command=self.open_workbook)
         self.load_button.pack(anchor="w", pady=(8, 0))
-        self.path_entry.bind("<Return>", lambda _event: self.on_load())
 
         sheets = ttk.LabelFrame(left, text="Листы", padding=8)
         sheets.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
@@ -214,34 +210,24 @@ class LetterApp:
         self.log = ScrolledText(log_frame, height=6, wrap="word", font=self._font)
         self.log.pack(fill="both", expand=True)
         self.log.bind("<Key>", self._log_key)
-        self.append_log("Укажите книгу Excel и загрузите листы.")
-
-    def browse_workbook(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Выберите книгу Excel",
-            filetypes=[("Книга Excel", "*.xlsx"), ("Все файлы", "*.*")],
-        )
-        if path:
-            self.path_var.set(path)
+        self.append_log("Открываю книгу…")
 
     def browse_attachment(self) -> None:
         path = filedialog.askopenfilename(title="Выберите вложение")
         if path:
             self.attachment_var.set(path)
 
-    def on_load(self) -> None:
+    def open_workbook(self) -> None:
         if self._busy:
             return
-        path = self.path_var.get().strip()
-        if not path:
-            messagebox.showwarning("Проверьте данные", "Укажите путь к файлу .xlsx.")
-            return
-        file_path = Path(path)
-        if file_path.suffix.lower() != ".xlsx":
-            messagebox.showwarning("Проверьте данные", "Нужен файл Excel с расширением .xlsx.")
-            return
-        if not file_path.is_file():
-            messagebox.showwarning("Проверьте данные", f"Файл не найден: {file_path}")
+        file_path = Path(self.workbook_path.strip().strip('"'))
+        missing = missing_workbook_message(self.workbook_path)
+        if missing:
+            self.loaded = []
+            self.loaded_path = None
+            self.sheet_list.show_message("Книга не открыта.")
+            self.append_log(one_line(missing))
+            messagebox.showerror("Книга Excel", missing)
             return
 
         self._busy = True
@@ -252,10 +238,16 @@ class LetterApp:
                 columns = read_workbook(file_path)
                 parsed_rows = [(name, parse_column(cells)) for name, cells in columns]
             except ExcelError as exc:
+                self.loaded = []
+                self.loaded_path = None
+                self.sheet_list.show_message("Книга не открыта.")
                 self.append_log(one_line(exc))
                 messagebox.showerror("Excel", str(exc))
                 return
             except Exception as exc:
+                self.loaded = []
+                self.loaded_path = None
+                self.sheet_list.show_message("Книга не открыта.")
                 self.append_log(one_line(exc))
                 messagebox.showerror("Excel", f"Не удалось прочитать книгу.\n{exc}")
                 return
@@ -279,11 +271,11 @@ class LetterApp:
         if self._busy:
             return
         problem = delivery_problem(
-            workbook=self.path_var.get(),
+            workbook=self.workbook_path,
             subject=self.subject_var.get(),
             body=self.body.get("1.0", "end"),
             attachment=self.attachment_var.get(),
-            loaded_path=self.loaded_path,
+            loaded=self.loaded_path is not None,
         )
         if problem:
             messagebox.showwarning("Проверьте данные", problem)
@@ -396,7 +388,8 @@ class LetterApp:
         return "break"
 
 
-def run() -> None:
+def run(workbook_path: str) -> None:
     root = tk.Tk()
-    LetterApp(root)
+    app = LetterApp(root, workbook_path)
+    root.after(200, app.open_workbook)
     root.mainloop()

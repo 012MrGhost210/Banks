@@ -21,6 +21,7 @@ from mailer.planning import (
     delivery_problem,
     format_log,
     format_skip,
+    missing_workbook_message,
     parse_column,
     plan_messages,
 )
@@ -125,40 +126,35 @@ class PlanMessagesTest(unittest.TestCase):
 
 
 class DeliveryProblemTest(unittest.TestCase):
-    def test_relative_path_matches_loaded_book(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp)
-            book = folder / "banks.xlsx"
-            book.write_bytes(b"x")
-            previous = os.getcwd()
-            try:
-                os.chdir(folder)
-                problem = delivery_problem(
-                    workbook="banks.xlsx",
-                    subject="Тема",
-                    body="Текст",
-                    attachment="",
-                    loaded_path=str(book.resolve()),
-                )
-            finally:
-                os.chdir(previous)
-        self.assertIsNone(problem)
+    def test_missing_workbook_names_the_path(self) -> None:
+        path = r"C:\путь\к\файлу\banks.xlsx"
+        text = missing_workbook_message(path)
+        self.assertIsNotNone(text)
+        self.assertIn("Файл книги не найден.", text)
+        self.assertIn("Искали здесь:", text)
+        self.assertIn(path, text)
+        problem = delivery_problem(
+            workbook=path,
+            subject="Тема",
+            body="Текст",
+            attachment="",
+            loaded=False,
+        )
+        self.assertIn(path, problem)
 
-    def test_requires_reload_when_path_changes(self) -> None:
+    def test_existing_workbook_can_be_sent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp)
-            first = folder / "one.xlsx"
-            second = folder / "two.xlsx"
-            first.write_bytes(b"x")
-            second.write_bytes(b"y")
+            book = Path(tmp) / "banks.xlsx"
+            book.write_bytes(b"x")
+            self.assertIsNone(missing_workbook_message(str(book)))
             problem = delivery_problem(
-                workbook=str(second),
+                workbook=str(book),
                 subject="Тема",
                 body="Текст",
                 attachment="",
-                loaded_path=str(first),
+                loaded=True,
             )
-        self.assertIn("Загрузите листы", problem)
+        self.assertIsNone(problem)
 
     def test_requires_subject_and_existing_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -169,17 +165,25 @@ class DeliveryProblemTest(unittest.TestCase):
                 subject="  ",
                 body="Текст",
                 attachment="",
-                loaded_path=str(book),
+                loaded=True,
             )
             missing = delivery_problem(
                 workbook=str(book),
                 subject="Тема",
                 body="Текст",
                 attachment=str(Path(tmp) / "no.pdf"),
-                loaded_path=str(book),
+                loaded=True,
+            )
+            closed = delivery_problem(
+                workbook=str(book),
+                subject="Тема",
+                body="Текст",
+                attachment="",
+                loaded=False,
             )
         self.assertIn("тему и текст", empty)
         self.assertIn("вложения", missing)
+        self.assertIn("не открыта", closed)
 
 
 class ArchiveTest(unittest.TestCase):
@@ -349,7 +353,7 @@ class UiSmokeTest(unittest.TestCase):
         root = tk.Tk()
         try:
             root.withdraw()
-            app = LetterApp(root)
+            app = LetterApp(root, r"C:\путь\к\файлу\banks.xlsx")
             root.update_idletasks()
             labels: list[str] = []
 
@@ -366,15 +370,17 @@ class UiSmokeTest(unittest.TestCase):
             walk(root)
             joined = "\n".join(labels)
             for expected in (
-                "Загрузить листы",
+                "Обновить листы",
                 "Отправить",
                 "Обзор…",
                 "Отметить все",
                 "Снять все",
                 "Тема:",
                 "Текст письма:",
+                r"C:\путь\к\файлу\banks.xlsx",
             ):
                 self.assertIn(expected, joined)
+            self.assertNotIn("Загрузить листы", joined)
             self.assertEqual(root.title(), "Banks — генератор писем")
             app.sheet_list.set_sheets([("Банк 1", 2), ("Банк 2", 0)])
             root.update_idletasks()
@@ -383,6 +389,30 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(app.sheet_list.selected_names(), [])
             app.sheet_list.select_all()
             self.assertEqual(app.sheet_list.selected_names(), ["Банк 1"])
+        finally:
+            root.destroy()
+
+    def test_missing_file_dialog_names_the_path(self) -> None:
+        if not os.environ.get("DISPLAY"):
+            self.skipTest("нет дисплея")
+        import tkinter as tk
+        from unittest.mock import patch
+
+        from mailer.ui import LetterApp
+
+        path = r"C:\путь\к\файлу\banks.xlsx"
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            app = LetterApp(root, path)
+            with patch("mailer.ui.messagebox.showerror") as show:
+                app.open_workbook()
+            show.assert_called_once()
+            self.assertEqual(show.call_args[0][0], "Книга Excel")
+            self.assertIn("Искали здесь:", show.call_args[0][1])
+            self.assertIn(path, show.call_args[0][1])
+            self.assertIsNone(app.loaded_path)
+            self.assertEqual(app.loaded, [])
         finally:
             root.destroy()
 

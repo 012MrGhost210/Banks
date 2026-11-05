@@ -240,7 +240,7 @@ class DeliveryProblemTest(unittest.TestCase):
                 sheets_loaded=False,
                 draft_loaded=True,
             )
-        self.assertIn("черновике", empty)
+        self.assertIn("тему и текст", empty)
         self.assertIn("вложения", missing)
         self.assertIn("не открыта", closed)
 
@@ -506,6 +506,38 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(app.sheet_list.selected_names(), [])
             app.sheet_list.select_all()
             self.assertEqual(app.sheet_list.selected_names(), ["Банк 1"])
+        finally:
+            root.destroy()
+
+    def test_draft_text_stays_editable(self) -> None:
+        tk = self._tk()
+        from mailer.ui import LetterApp
+
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            app = LetterApp(
+                root,
+                r"C:\путь\к\файлу\banks.xlsx",
+                r"C:\путь\к\файлу\draft.msg",
+            )
+            app.draft_cc = "boss@example.com"
+            app.draft_loaded = True
+            app._show_draft("Тема из черновика", "Текст из черновика", "boss@example.com")
+            self.assertEqual(app.body.cget("state"), "normal")
+            self.assertEqual(app.cc_box.cget("state"), "disabled")
+            app.body.insert("end", "\nПравлено в окне.")
+            app.subject_var.set("Новая тема")
+            messages = plan_messages(
+                [{"name": "Банк 1", "addresses": ["ivan@bank.ru"], "selected": True}],
+                app.current_subject(),
+                app.current_body(),
+                cc=app.draft_cc,
+            )
+            self.assertEqual(messages[0]["to"], "ivan@bank.ru")
+            self.assertEqual(messages[0]["subject"], "Новая тема")
+            self.assertEqual(messages[0]["body"], "Текст из черновика\nПравлено в окне.")
+            self.assertEqual(messages[0]["cc"], "boss@example.com")
         finally:
             root.destroy()
 

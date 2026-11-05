@@ -203,7 +203,7 @@ def delivery_problem(
     if not draft_loaded:
         return "Черновик не открыт. Проверьте путь DRAFT_PATH в файле app.py."
     if not subject.strip() or not body.strip():
-        return "В черновике нет темы или текста. Откройте файл .msg и заполните письмо."
+        return "Заполните тему и текст письма. Черновик только подставляет их в окно."
     attachment_text = attachment.strip()
     if attachment_text and not Path(attachment_text).is_file():
         return "Файл вложения не найден."

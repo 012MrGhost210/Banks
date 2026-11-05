@@ -21,6 +21,7 @@ from mailer.planning import (
     delivery_problem,
     format_log,
     format_skip,
+    missing_draft_message,
     missing_workbook_message,
     parse_column,
     plan_messages,
@@ -97,12 +98,34 @@ class PlanMessagesTest(unittest.TestCase):
             [("Банк 1", "a@bank.ru"), ("Банк 1", "b@bank.ru"), ("Банк 2", "a@bank.ru")],
         )
         for item in messages:
-            self.assertEqual(set(item), {"sheet", "to", "subject", "body", "attachment"})
+            self.assertEqual(set(item), {"sheet", "to", "subject", "body", "cc", "attachment"})
             self.assertEqual(item["subject"], "Тема")
             self.assertEqual(item["body"], "Текст письма")
+            self.assertEqual(item["cc"], "")
             self.assertEqual(item["attachment"], "C:/docs/file.pdf")
             self.assertNotIn(",", item["to"])
             self.assertNotIn(";", item["to"])
+
+    def test_to_comes_from_sheet_and_letter_from_draft(self) -> None:
+        messages = plan_messages(
+            [
+                {"name": "Банк 1", "addresses": ["ivan@bank.ru", "maria@bank.ru"], "selected": True},
+                {"name": "Банк 2", "addresses": ["petr@bank.ru"], "selected": True},
+            ],
+            subject="Тема из черновика",
+            body="Текст из черновика",
+            cc="boss@example.com; lawyer@example.com",
+        )
+        self.assertEqual(
+            [item["to"] for item in messages],
+            ["ivan@bank.ru", "maria@bank.ru", "petr@bank.ru"],
+        )
+        for item in messages:
+            self.assertEqual(item["subject"], "Тема из черновика")
+            self.assertEqual(item["body"], "Текст из черновика")
+            self.assertEqual(item["cc"], "boss@example.com; lawyer@example.com")
+            self.assertNotIn(";", item["to"])
+            self.assertNotIn(",", item["to"])
 
     def test_blank_attachment_is_none(self) -> None:
         messages = plan_messages(
@@ -135,53 +158,89 @@ class DeliveryProblemTest(unittest.TestCase):
         self.assertIn(path, text)
         problem = delivery_problem(
             workbook=path,
+            draft=r"C:\путь\к\файлу\draft.msg",
             subject="Тема",
             body="Текст",
             attachment="",
-            loaded=False,
+            sheets_loaded=False,
+            draft_loaded=False,
         )
+        self.assertIn(path, problem)
+
+    def test_missing_draft_names_the_path(self) -> None:
+        path = r"C:\путь\к\файлу\draft.msg"
+        text = missing_draft_message(path)
+        self.assertIsNotNone(text)
+        self.assertIn("Файл черновика не найден.", text)
+        self.assertIn("Искали здесь:", text)
+        self.assertIn(path, text)
+        with tempfile.TemporaryDirectory() as tmp:
+            book = Path(tmp) / "banks.xlsx"
+            book.write_bytes(b"x")
+            problem = delivery_problem(
+                workbook=str(book),
+                draft=path,
+                subject="Тема",
+                body="Текст",
+                attachment="",
+                sheets_loaded=True,
+                draft_loaded=False,
+            )
         self.assertIn(path, problem)
 
     def test_existing_workbook_can_be_sent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             book = Path(tmp) / "banks.xlsx"
             book.write_bytes(b"x")
+            draft = Path(tmp) / "draft.msg"
+            draft.write_bytes(b"msg")
             self.assertIsNone(missing_workbook_message(str(book)))
+            self.assertIsNone(missing_draft_message(str(draft)))
             problem = delivery_problem(
                 workbook=str(book),
+                draft=str(draft),
                 subject="Тема",
                 body="Текст",
                 attachment="",
-                loaded=True,
+                sheets_loaded=True,
+                draft_loaded=True,
             )
         self.assertIsNone(problem)
 
-    def test_requires_subject_and_existing_attachment(self) -> None:
+    def test_requires_draft_text_and_existing_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             book = Path(tmp) / "banks.xlsx"
             book.write_bytes(b"x")
+            draft = Path(tmp) / "draft.msg"
+            draft.write_bytes(b"msg")
             empty = delivery_problem(
                 workbook=str(book),
+                draft=str(draft),
                 subject="  ",
                 body="Текст",
                 attachment="",
-                loaded=True,
+                sheets_loaded=True,
+                draft_loaded=True,
             )
             missing = delivery_problem(
                 workbook=str(book),
+                draft=str(draft),
                 subject="Тема",
                 body="Текст",
                 attachment=str(Path(tmp) / "no.pdf"),
-                loaded=True,
+                sheets_loaded=True,
+                draft_loaded=True,
             )
             closed = delivery_problem(
                 workbook=str(book),
+                draft=str(draft),
                 subject="Тема",
                 body="Текст",
                 attachment="",
-                loaded=False,
+                sheets_loaded=False,
+                draft_loaded=True,
             )
-        self.assertIn("тему и текст", empty)
+        self.assertIn("черновике", empty)
         self.assertIn("вложения", missing)
         self.assertIn("не открыта", closed)
 
@@ -282,6 +341,36 @@ class FakeMail:
         self.sent = True
 
 
+class _FakeDraftItem:
+    def __init__(self) -> None:
+        self.Subject = "Тема из черновика"
+        self.Body = "Текст из черновика"
+        self.CC = "boss@example.com; lawyer@example.com"
+        self.closed: int | None = None
+        self.sent = False
+
+    def Close(self, mode: int) -> None:
+        self.closed = mode
+
+    def Send(self) -> None:
+        self.sent = True
+
+
+class _FakeDraftOutlook:
+    def __init__(self, item: _FakeDraftItem) -> None:
+        self.item = item
+        self.opened: str | None = None
+
+    def GetNamespace(self, name: str) -> "_FakeDraftOutlook":
+        if name != "MAPI":
+            raise AssertionError(name)
+        return self
+
+    def OpenSharedItem(self, path: str) -> _FakeDraftItem:
+        self.opened = path
+        return self.item
+
+
 class FakeOutlook:
     def __init__(self) -> None:
         self.created: list[FakeMail] = []
@@ -316,9 +405,10 @@ class OutlookGuardTest(unittest.TestCase):
             sender._app = fake
             messages = plan_messages(
                 [{"name": "Банк 1", "addresses": ["a@b.ru", "c@d.ru"], "selected": True}],
-                subject="Тема",
-                body="Текст",
+                subject="Тема из черновика",
+                body="Текст из черновика",
                 attachment=str(attachment),
+                cc="boss@example.com; lawyer@example.com",
             )
             for message in messages:
                 sender.send(message)
@@ -326,12 +416,26 @@ class OutlookGuardTest(unittest.TestCase):
         self.assertEqual(len(fake.created), 2)
         self.assertEqual([mail.To for mail in fake.created], ["a@b.ru", "c@d.ru"])
         for mail in fake.created:
-            self.assertEqual(mail.Subject, "Тема")
-            self.assertEqual(mail.Body, "Текст")
-            self.assertEqual(mail.CC, "")
+            self.assertEqual(mail.Subject, "Тема из черновика")
+            self.assertEqual(mail.Body, "Текст из черновика")
+            self.assertEqual(mail.CC, "boss@example.com; lawyer@example.com")
             self.assertEqual(mail.BCC, "")
+            self.assertNotIn(";", mail.To)
             self.assertTrue(mail.sent)
             self.assertEqual(mail.added, [str(attachment.resolve())])
+
+    def test_read_draft_copies_cc_and_does_not_send(self) -> None:
+        item = _FakeDraftItem()
+        outlook = _FakeDraftOutlook(item)
+        sender = OutlookSender()
+        sender._app = outlook
+        draft = sender.read_draft(r"C:\путь\к\файлу\draft.msg")
+        self.assertEqual(draft.subject, "Тема из черновика")
+        self.assertEqual(draft.body, "Текст из черновика")
+        self.assertEqual(draft.cc, "boss@example.com; lawyer@example.com")
+        self.assertEqual(item.closed, 1)
+        self.assertFalse(item.sent)
+        self.assertTrue(outlook.opened)
 
     def test_connect_reports_a_clear_error_and_does_not_send(self) -> None:
         sender = OutlookSender()
@@ -343,17 +447,28 @@ class OutlookGuardTest(unittest.TestCase):
 
 
 class UiSmokeTest(unittest.TestCase):
-    def test_window_has_russian_controls(self) -> None:
+    def _tk(self):
+        try:
+            import tkinter as tk
+        except ModuleNotFoundError:
+            self.skipTest("нет tkinter")
         if not os.environ.get("DISPLAY"):
             self.skipTest("нет дисплея")
-        import tkinter as tk
+        return tk
+
+    def test_window_has_russian_controls(self) -> None:
+        tk = self._tk()
 
         from mailer.ui import LetterApp
 
         root = tk.Tk()
         try:
             root.withdraw()
-            app = LetterApp(root, r"C:\путь\к\файлу\banks.xlsx")
+            app = LetterApp(
+                root,
+                r"C:\путь\к\файлу\banks.xlsx",
+                r"C:\путь\к\файлу\draft.msg",
+            )
             root.update_idletasks()
             labels: list[str] = []
 
@@ -370,14 +485,16 @@ class UiSmokeTest(unittest.TestCase):
             walk(root)
             joined = "\n".join(labels)
             for expected in (
-                "Обновить листы",
+                "Обновить",
                 "Отправить",
                 "Обзор…",
                 "Отметить все",
                 "Снять все",
                 "Тема:",
                 "Текст письма:",
+                "Копия (Cc):",
                 r"C:\путь\к\файлу\banks.xlsx",
+                r"C:\путь\к\файлу\draft.msg",
             ):
                 self.assertIn(expected, joined)
             self.assertNotIn("Загрузить листы", joined)
@@ -393,9 +510,7 @@ class UiSmokeTest(unittest.TestCase):
             root.destroy()
 
     def test_missing_file_dialog_names_the_path(self) -> None:
-        if not os.environ.get("DISPLAY"):
-            self.skipTest("нет дисплея")
-        import tkinter as tk
+        tk = self._tk()
         from unittest.mock import patch
 
         from mailer.ui import LetterApp
@@ -404,7 +519,7 @@ class UiSmokeTest(unittest.TestCase):
         root = tk.Tk()
         try:
             root.withdraw()
-            app = LetterApp(root, path)
+            app = LetterApp(root, path, r"C:\путь\к\файлу\draft.msg")
             with patch("mailer.ui.messagebox.showerror") as show:
                 app.open_workbook()
             show.assert_called_once()
@@ -413,6 +528,27 @@ class UiSmokeTest(unittest.TestCase):
             self.assertIn(path, show.call_args[0][1])
             self.assertIsNone(app.loaded_path)
             self.assertEqual(app.loaded, [])
+        finally:
+            root.destroy()
+
+    def test_missing_draft_dialog_names_the_path(self) -> None:
+        tk = self._tk()
+        from unittest.mock import patch
+
+        from mailer.ui import LetterApp
+
+        path = r"C:\путь\к\файлу\draft.msg"
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            app = LetterApp(root, r"C:\путь\к\файлу\banks.xlsx", path)
+            with patch("mailer.ui.messagebox.showerror") as show:
+                app.open_draft()
+            show.assert_called_once()
+            self.assertEqual(show.call_args[0][0], "Черновик")
+            self.assertIn("Искали здесь:", show.call_args[0][1])
+            self.assertIn(path, show.call_args[0][1])
+            self.assertFalse(app.draft_loaded)
         finally:
             root.destroy()
 

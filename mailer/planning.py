@@ -77,12 +77,13 @@ def plan_messages(
     subject: str,
     body: str,
     attachment: str | None = None,
+    cc: str = "",
 ) -> list[dict]:
     """Собрать письма, которые уйдут по одному на адрес.
 
-    Лист без отметки или без адресов не попадает в план. В каждом элементе
-    ровно один получатель. Ключи: sheet, to, subject, body, attachment.
-    Outlook для этого не нужен.
+    Получатель «Кому» берётся из листа. Тема, текст и копия (Cc) — из черновика
+    и одинаковы для всех. Лист без отметки или без адресов не попадает в план.
+    Ключи: sheet, to, subject, body, cc, attachment. Outlook для этого не нужен.
     """
     if isinstance(attachment, str):
         attachment_path = attachment.strip() or None
@@ -90,6 +91,7 @@ def plan_messages(
         attachment_path = None
     else:
         attachment_path = str(attachment)
+    cc_value = str(cc or "").strip()
 
     planned: list[dict] = []
     for sheet in sheets:
@@ -106,20 +108,36 @@ def plan_messages(
                     "to": recipient,
                     "subject": subject,
                     "body": body,
+                    "cc": cc_value,
                     "attachment": attachment_path,
                 }
             )
     return planned
 
 
-def confirmation_text(count: int, subject: str) -> str:
+def cc_people(cc: str) -> list[str]:
+    """Разобрать строку копии Outlook на отдельных людей для показа в окне."""
+    people: list[str] = []
+    for part in str(cc or "").replace("\n", ";").split(";"):
+        person = part.strip().strip(",")
+        if person:
+            people.append(person)
+    return people
+
+
+def confirmation_text(count: int, subject: str, cc: str = "") -> str:
     shown = one_line(subject)
     if len(shown) > 120:
         shown = shown[:117] + "..."
+    people = cc_people(cc)
+    copy_line = ""
+    if people:
+        copy_line = "В копии каждого письма: " + "; ".join(people) + "\n\n"
     return (
         f"Число отдельных писем: {count}.\n\n"
-        "Каждое письмо уйдёт только одному адресу. "
-        "Остальные получатели в это письмо не попадут.\n\n"
+        "Каждое письмо уйдёт только одному адресу в поле «Кому». "
+        "Остальные адреса из таблицы в это письмо не попадут.\n\n"
+        f"{copy_line}"
         f"Тема: {shown}\n\n"
         "Продолжить?"
     )
@@ -144,22 +162,48 @@ def missing_workbook_message(path: str) -> str | None:
     return None
 
 
+def missing_draft_message(path: str) -> str | None:
+    """Если черновик по константе открыть нельзя — текст ошибки, иначе None."""
+    text = str(path).strip().strip('"')
+    if not text:
+        return (
+            "Путь к черновику не задан.\n"
+            "Откройте app.py и в константе DRAFT_PATH пропишите путь к файлу .msg."
+        )
+    file_path = Path(text)
+    if not file_path.is_file():
+        return f"Файл черновика не найден.\nИскали здесь:\n{text}"
+    if file_path.suffix.lower() != ".msg":
+        return (
+            "Черновик должен быть файлом Outlook .msg.\n"
+            f"Искали здесь:\n{text}"
+        )
+    return None
+
+
 def delivery_problem(
     *,
     workbook: str,
+    draft: str,
     subject: str,
     body: str,
     attachment: str,
-    loaded: bool,
+    sheets_loaded: bool,
+    draft_loaded: bool,
 ) -> str | None:
     """Проверка полей перед планом писем. None — можно продолжать."""
     missing = missing_workbook_message(workbook)
     if missing:
         return missing
-    if not loaded:
+    missing_draft = missing_draft_message(draft)
+    if missing_draft:
+        return missing_draft
+    if not sheets_loaded:
         return "Книга не открыта. Проверьте путь WORKBOOK_PATH в файле app.py."
+    if not draft_loaded:
+        return "Черновик не открыт. Проверьте путь DRAFT_PATH в файле app.py."
     if not subject.strip() or not body.strip():
-        return "Заполните тему и текст письма. Они одинаковые для всех получателей."
+        return "В черновике нет темы или текста. Откройте файл .msg и заполните письмо."
     attachment_text = attachment.strip()
     if attachment_text and not Path(attachment_text).is_file():
         return "Файл вложения не найден."

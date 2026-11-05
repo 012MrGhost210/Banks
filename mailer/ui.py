@@ -13,10 +13,12 @@ from mailer.excel_book import ExcelError, read_workbook
 from mailer.outlook_mail import OutlookError, OutlookSender
 from mailer.planning import (
     ColumnParse,
+    cc_people,
     confirmation_text,
     delivery_problem,
     format_log,
     format_skip,
+    missing_draft_message,
     missing_workbook_message,
     one_line,
     parse_column,
@@ -116,11 +118,16 @@ class SheetList(ttk.Frame):
 
 
 class LetterApp:
-    def __init__(self, root: tk.Tk, workbook_path: str) -> None:
+    def __init__(self, root: tk.Tk, workbook_path: str, draft_path: str) -> None:
         self.root = root
         self.workbook_path = workbook_path
+        self.draft_path = draft_path
         self.loaded: list[tuple[str, ColumnParse]] = []
         self.loaded_path: str | None = None
+        self.draft_subject = ""
+        self.draft_body = ""
+        self.draft_cc = ""
+        self.draft_loaded = False
         self._busy = False
         self._font = self._choose_font()
         self.root.title("Banks — генератор писем")
@@ -151,9 +158,11 @@ class LetterApp:
         ttk.Label(
             outer,
             text=(
-                "Один текст для всех получателей. "
-                "Каждый адрес получит отдельное письмо, списки не объединяются."
+                "Тема и текст берутся из черновика. "
+                "Каждый адрес из таблицы получит отдельное письмо. "
+                "Люди из копии черновика будут в Cc каждого письма."
             ),
+            wraplength=980,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         left = ttk.Frame(outer)
@@ -170,7 +179,7 @@ class LetterApp:
         book.grid(row=0, column=0, sticky="ew")
         self.book_label = ttk.Label(book, text=self.workbook_path, wraplength=440, justify="left")
         self.book_label.pack(anchor="w")
-        self.load_button = ttk.Button(book, text="Обновить листы", command=self.open_workbook)
+        self.load_button = ttk.Button(book, text="Обновить", command=self.open_sources)
         self.load_button.pack(anchor="w", pady=(8, 0))
 
         sheets = ttk.LabelFrame(left, text="Листы", padding=8)
@@ -182,14 +191,20 @@ class LetterApp:
         self.sheet_list = SheetList(sheets)
         self.sheet_list.pack(fill="both", expand=True, pady=(6, 0))
 
-        letter = ttk.LabelFrame(right, text="Письмо", padding=8)
+        letter = ttk.LabelFrame(right, text="Черновик", padding=8)
         letter.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(letter, text="Тема:").pack(anchor="w")
-        self.subject_var = tk.StringVar()
-        ttk.Entry(letter, textvariable=self.subject_var).pack(fill="x", pady=(2, 6))
-        ttk.Label(letter, text="Текст письма:").pack(anchor="w")
-        self.body = tk.Text(letter, height=8, wrap="word", undo=True, font=self._font)
+        self.draft_label = ttk.Label(letter, text=self.draft_path, wraplength=460, justify="left")
+        self.draft_label.pack(anchor="w")
+        ttk.Label(letter, text="Тема:").pack(anchor="w", pady=(6, 0))
+        self.subject_label = ttk.Label(letter, text="—", wraplength=460, justify="left")
+        self.subject_label.pack(anchor="w", fill="x")
+        ttk.Label(letter, text="Текст письма:").pack(anchor="w", pady=(6, 0))
+        self.body = tk.Text(letter, height=7, wrap="word", font=self._font)
         self.body.pack(fill="both", expand=True, pady=(2, 0))
+        ttk.Label(letter, text="Копия (Cc):").pack(anchor="w", pady=(6, 0))
+        self.cc_box = tk.Text(letter, height=3, wrap="word", font=self._font)
+        self.cc_box.pack(fill="x", pady=(2, 0))
+        self._show_draft("", "", "")
 
         attachment = ttk.LabelFrame(right, text="Вложение (необязательно)", padding=8)
         attachment.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -210,7 +225,7 @@ class LetterApp:
         self.log = ScrolledText(log_frame, height=6, wrap="word", font=self._font)
         self.log.pack(fill="both", expand=True)
         self.log.bind("<Key>", self._log_key)
-        self.append_log("Открываю книгу…")
+        self.append_log("Открываю книгу и черновик…")
 
     def browse_attachment(self) -> None:
         path = filedialog.askopenfilename(title="Выберите вложение")
@@ -267,22 +282,67 @@ class LetterApp:
         total = sum(len(parsed.addresses) for _name, parsed in parsed_rows)
         self.append_log(f"Загружено листов: {len(parsed_rows)}. Уникальных адресов: {total}.")
 
+    def open_draft(self) -> None:
+        if self._busy:
+            return
+        missing = missing_draft_message(self.draft_path)
+        if missing:
+            self._clear_draft()
+            self.append_log(one_line(missing))
+            messagebox.showerror("Черновик", missing)
+            return
+
+        self._busy = True
+        self.load_button.configure(state="disabled")
+        self.root.update_idletasks()
+        sender = OutlookSender()
+        try:
+            try:
+                sender.connect()
+                draft = sender.read_draft(self.draft_path)
+            except OutlookError as exc:
+                self._clear_draft()
+                self.append_log(one_line(exc))
+                messagebox.showerror("Черновик", str(exc))
+                return
+        finally:
+            sender.release()
+            self._busy = False
+            self.load_button.configure(state="normal")
+
+        self.draft_subject = draft.subject
+        self.draft_body = draft.body
+        self.draft_cc = draft.cc
+        self.draft_loaded = True
+        self._show_draft(draft.subject, draft.body, draft.cc)
+        people = cc_people(draft.cc)
+        if people:
+            self.append_log(f"Черновик открыт. В копии: {len(people)}.")
+        else:
+            self.append_log("Черновик открыт. В копии никого нет.")
+
+    def open_sources(self) -> None:
+        self.open_workbook()
+        self.open_draft()
+
     def on_send(self) -> None:
         if self._busy:
             return
         problem = delivery_problem(
             workbook=self.workbook_path,
-            subject=self.subject_var.get(),
-            body=self.body.get("1.0", "end"),
+            draft=self.draft_path,
+            subject=self.draft_subject,
+            body=self.draft_body,
             attachment=self.attachment_var.get(),
-            loaded=self.loaded_path is not None,
+            sheets_loaded=self.loaded_path is not None,
+            draft_loaded=self.draft_loaded,
         )
         if problem:
             messagebox.showwarning("Проверьте данные", problem)
             return
 
-        subject = self.subject_var.get().strip()
-        body = self.body.get("1.0", "end").strip()
+        subject = self.draft_subject.strip()
+        body = self.draft_body.strip()
         attachment_text = self.attachment_var.get().strip()
         selected = set(self.sheet_list.selected_names())
         sheets = [
@@ -293,14 +353,23 @@ class LetterApp:
             }
             for name, parsed in self.loaded
         ]
-        messages = plan_messages(sheets, subject, body, attachment_text or None)
+        messages = plan_messages(
+            sheets,
+            subject,
+            body,
+            attachment_text or None,
+            self.draft_cc,
+        )
         if not messages:
             messagebox.showinfo(
                 "Нечего отправлять",
                 "Среди отмеченных листов нет адресов. Письма не отправлялись.",
             )
             return
-        if not messagebox.askyesno("Подтверждение отправки", confirmation_text(len(messages), subject)):
+        if not messagebox.askyesno(
+            "Подтверждение отправки",
+            confirmation_text(len(messages), subject, self.draft_cc),
+        ):
             self.append_log("Отправка отменена.")
             return
 
@@ -359,6 +428,26 @@ class LetterApp:
     def _select_none(self) -> None:
         self.sheet_list.select_none()
 
+    def _clear_draft(self) -> None:
+        self.draft_subject = ""
+        self.draft_body = ""
+        self.draft_cc = ""
+        self.draft_loaded = False
+        self._show_draft("", "", "")
+
+    def _show_draft(self, subject: str, body: str, cc: str) -> None:
+        self.subject_label.configure(text=subject.strip() or "—")
+        people = cc_people(cc)
+        cc_text = "\n".join(people) if people else "В черновике никого нет в копии."
+        self._set_readonly(self.body, body.strip() or "Текст появится из черновика.")
+        self._set_readonly(self.cc_box, cc_text)
+
+    def _set_readonly(self, widget: tk.Text, text: str) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")
+
     def clear_log(self) -> None:
         self.log.delete("1.0", "end")
 
@@ -388,8 +477,8 @@ class LetterApp:
         return "break"
 
 
-def run(workbook_path: str) -> None:
+def run(workbook_path: str, draft_path: str) -> None:
     root = tk.Tk()
-    app = LetterApp(root, workbook_path)
-    root.after(200, app.open_workbook)
+    app = LetterApp(root, workbook_path, draft_path)
+    root.after(200, app.open_sources)
     root.mainloop()

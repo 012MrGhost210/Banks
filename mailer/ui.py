@@ -158,7 +158,7 @@ class LetterApp:
         ttk.Label(
             outer,
             text=(
-                "Тема и текст берутся из черновика. "
+                "Черновик подставляет тему и текст — их можно поправить. "
                 "Каждый адрес из таблицы получит отдельное письмо. "
                 "Люди из копии черновика будут в Cc каждого письма."
             ),
@@ -196,10 +196,10 @@ class LetterApp:
         self.draft_label = ttk.Label(letter, text=self.draft_path, wraplength=460, justify="left")
         self.draft_label.pack(anchor="w")
         ttk.Label(letter, text="Тема:").pack(anchor="w", pady=(6, 0))
-        self.subject_label = ttk.Label(letter, text="—", wraplength=460, justify="left")
-        self.subject_label.pack(anchor="w", fill="x")
+        self.subject_var = tk.StringVar()
+        ttk.Entry(letter, textvariable=self.subject_var).pack(fill="x", pady=(2, 0))
         ttk.Label(letter, text="Текст письма:").pack(anchor="w", pady=(6, 0))
-        self.body = tk.Text(letter, height=7, wrap="word", font=self._font)
+        self.body = tk.Text(letter, height=7, wrap="word", undo=True, font=self._font)
         self.body.pack(fill="both", expand=True, pady=(2, 0))
         ttk.Label(letter, text="Копия (Cc):").pack(anchor="w", pady=(6, 0))
         self.cc_box = tk.Text(letter, height=3, wrap="word", font=self._font)
@@ -328,11 +328,13 @@ class LetterApp:
     def on_send(self) -> None:
         if self._busy:
             return
+        subject = self.current_subject()
+        body = self.current_body()
         problem = delivery_problem(
             workbook=self.workbook_path,
             draft=self.draft_path,
-            subject=self.draft_subject,
-            body=self.draft_body,
+            subject=subject,
+            body=body,
             attachment=self.attachment_var.get(),
             sheets_loaded=self.loaded_path is not None,
             draft_loaded=self.draft_loaded,
@@ -340,9 +342,6 @@ class LetterApp:
         if problem:
             messagebox.showwarning("Проверьте данные", problem)
             return
-
-        subject = self.draft_subject.strip()
-        body = self.draft_body.strip()
         attachment_text = self.attachment_var.get().strip()
         selected = set(self.sheet_list.selected_names())
         sheets = [
@@ -435,12 +434,24 @@ class LetterApp:
         self.draft_loaded = False
         self._show_draft("", "", "")
 
+    def current_subject(self) -> str:
+        return self.subject_var.get().strip()
+
+    def current_body(self) -> str:
+        return self.body.get("1.0", "end").strip()
+
     def _show_draft(self, subject: str, body: str, cc: str) -> None:
-        self.subject_label.configure(text=subject.strip() or "—")
+        self.subject_var.set(subject.strip())
+        self._set_editable(self.body, body.strip())
         people = cc_people(cc)
         cc_text = "\n".join(people) if people else "В черновике никого нет в копии."
-        self._set_readonly(self.body, body.strip() or "Текст появится из черновика.")
         self._set_readonly(self.cc_box, cc_text)
+
+    def _set_editable(self, widget: tk.Text, text: str) -> None:
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        if text:
+            widget.insert("1.0", text)
 
     def _set_readonly(self, widget: tk.Text, text: str) -> None:
         widget.configure(state="normal")
